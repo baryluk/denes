@@ -12,6 +12,8 @@
 
 % TODO: listen on multiple interfaces, multiple ports, multiple addresses, and ipv6
 % TODO: cache, and negative caching (caching of request which returned that given name+record do not exists)
+% TODO: be sure to not poison cache
+% TODO: do not cache bogus answers, or answers returned using TCP (larger than 512).
 % TODO: recursive and non-recursive
 % TODO: non-recursive modes: delegation, sending upstream (but with caching), forward&reverse zones
 % TODO: dnssec
@@ -28,11 +30,13 @@
 % TODO: loading data from simple txt files, erlang tuples, BIND files, Mnesia or Postgresql database
 % TODO: Dynamic dns update
 % TODO: wildcard dns records
-% TODO: using local databases for example for blocking connections to the fishing and malwear sites
-% TODO: blocking MX queries
+% TODO: using local databases for example for blocking connections to the fishing and malwear sites, based on IP or Domain name
+% TODO: blocking MX queries, and removing them from additional section
 % TODO: Serialization of queries from single IP
 % TODO: ratelimiting
 % TODO: overload control
+% TODO: Filtering out IPv6 or IPv4 addresses from answers (if both exists, and keeping only IPv4 or IPv6, or returning NXDOMAIN)
+% TODO: reject DNS messages which uses private range of record types 65280-65534
 
 start() ->
 	start(?PORT).

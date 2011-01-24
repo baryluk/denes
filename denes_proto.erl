@@ -1,4 +1,5 @@
 -module(denes_proto).
+-author('baryluk@smp.if.uj.edu.pl').
 
 -export([decode_packet/1]).
 

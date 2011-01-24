@@ -37,10 +37,11 @@ Roadmap (in order):
    . ...
    . cache
    . ...
+   . resolvconf integration (reloading upstream nameserver after network reconnection, DHCP update)
    . transparent proxy, sniffer mode
    . avahi supprt
    . ...
 
 
-Copyright: Witold Baryluk, 2010
+Copyright: Witold Baryluk, 2011
 License: BSD
