@@ -60,39 +60,45 @@ decode_packet(P) when is_binary(P) ->
 normalize_name(Name) ->
 	Name.
 
-% Reads and verify label from DNS packet, and returns {ReversedLabels, Rest}
+% Reads and verify label from DNS packet, and returns {ok, ReversedLabels, Rest}
 
 read_labels(Bin) when is_binary(Bin), byte_size(Bin) >= 1 ->
 	io:format("reading labels: ~p~n", [Bin]),
-	{Labels, Rest} = read_labels(Bin, []),
+	WholePacket = suffix_cmompression_not_implemented_yet,
+	{Labels, Rest} = read_labels(Bin, [], WholePacket),
 	ok = verify_labels(Labels),
 	{ok, Labels, Rest}.
 
-read_labels(<<0:8, Rest/binary>>, Acc) ->
+read_labels(<<2#00:2, 0:6, Rest/binary>>, Acc, _WholePacket) ->
 	{Acc, Rest};
 % binary pattern matching magic
-read_labels(<<2#00:2, Length:6, Label:Length/binary, Rest/binary>>, Acc) when 1 =< Length, Length =< 63  ->
-	read_labels(Rest, [Label | Acc]).
-% manualy unpack and check length
+read_labels(<<2#00:2, Length:6, Label:Length/binary, Rest/binary>>, Acc, WholePacket) when 1 =< Length, Length =< 63  ->
+	read_labels(Rest, [Label | Acc], WholePacket);
+% manualy unpack and check length (it is equivalent to clause two lines above)
 %read_label(<<Length:8, Rest/binary>>, Acc) when Length >= 1, Length =< 63  ->
 %	<<Label:Length/binary, Rest2/binary>> = Rest,
-%	read_label(Rest2, [Label | Acc]).
+%	read_label(Rest2, [Label | Acc]);
 read_labels(<<2#11:2, Offset:14, Rest/binary>>, Acc, WholePacket) ->
 	<<_Skip:Offset, RestOfWhole/binary>> = WholePacket,
-	throw(suffix_compression_not_implemented),
-	read_labels(RestOfWhole, Acc, WholePacket).
+	throw(suffix_compression_not_implemented_yet),
+	read_labels(RestOfWhole, Acc, WholePacket);
 
 % binary label, experimental, [RFC3364][RFC3363][RFC2673]
-% read_labels(<<2#01000001, Rest/binary>>, Acc, WholePacket) ->
+read_labels(<<2#01000001, _Rest/binary>>, _Acc, _WholePacket) ->
+	throw(binary_label_not_implemented);
 % Reserved for future expansion. [RFC2671]
-% read_labels(<<2#01111111, Rest/binary>>, Acc, WholePacket) ->
+read_labels(<<2#01111111, _Rest/binary>>, _Acc, _WholePacket) ->
+	throw(extended_label_not_implemented);
 % extended label, RFC2671
-% read_labels(<<2#01:2, _:6, Rest/binary>>, Acc, WholePacket) ->
+read_labels(<<2#01:2, _:6, _Rest/binary>>, _Acc, _WholePacket) ->
+	throw(extended_label_not_implemented);
 % unallocated
-% read_labels(<<2#10:2, _:6, Rest/binary>>, Acc, WholePacket) ->
+read_labels(<<2#10:2, _:6, _Rest/binary>>, _Acc, _WholePacket) ->
+	throw(unsupported_label_scheme).
 
 
 % Important TODO: One should be aware that if trunction flag is true, then packet is incomplete and can contain broken entries.
+%  as truncation bondoary can happen in the middle of record, rdata, or label.
 
 
 % from rfc 1035
@@ -257,43 +263,55 @@ qclasses(T) ->
 read_rr(P) when is_binary(P), byte_size(P) >= 1+2+2+4+2 ->   % at least: 1 byte of length in name (.), 2 bytes for type, 2 bytes for class, 4 bytes for ttl, 2 bytes for rdlength
 	{ok, Labels, Rest} = read_labels(P),
 	<<Type:16, Class:16, TTL:32/unsigned, RDataLength:16, RData:RDataLength/binary, Rest2/binary>> = Rest,
-	% according to errata 2130, to the rfc 1035 from 2010-04-05, section 3.2.1 errornously uses signed TTL, with conflict with section 4.1.3
+	% according to errata id 2130, to the rfc 1035 from 2010-04-05, section 3.2.1 errornously uses signed TTL, with conflict with section 4.1.3
 	RDataLength = byte_size(RData),
-	case types(Type) of
-		cname ->
+	{RR, Rest3} = case {types(Type), classes(Class)} of
+%		{in, aaaa} ->
+%			{ok, AAAA} = read_in_aaaa(RData),
+%			{{Type, Class, TTL, AAAA}, Rest2}
+		{_, cname} ->
 			{ok, CName} = read_cname(RData),
 			{{Type, Class, TTL, CName}, Rest2};
-		ns ->
+		{in, a} ->
+			{ok, IP} = read_in_a(RData),
+			{{Type, Class, TTL, IP}, Rest2};
+		{_, ns} ->
 			{ok, NSDName} = read_ns(RData),
 			{{Type, Class, TTL, NSDName}, Rest2};
-		ptr ->
+		{_, ptr} ->
 			{ok, PTR} = read_ptr(RData),
 			{{Type, Class, TTL, PTR}, Rest2};
-		mx ->
+		{_, mx} ->
 			{ok, MX} = read_mx(RData),
 			{{Type, Class, TTL, MX}, Rest2};
-		hinfo ->
+		{_, soa} ->
+			{ok, SOA} = read_soa(RData),
+			{{Type, Class, TTL, SOA}, Rest2};
+		{in, wks} ->
+			{ok, WKS} = read_in_wks(RData),
+			{{Type, Class, TTL, WKS}, Rest2};
+		{_, hinfo} ->
 			{ok, HInfo} = read_hinfo(RData),
 			{{Type, Class, TTL, HInfo}, Rest2};
-		a ->
-			case classes(Class) of
-				in ->
-					{ok, IP} = read_in_a(RData),
-					{{Type, Class, TTL, IP}, Rest2}
-			end
-	end.
+		{_, null} ->
+			{ok, NULL} = read_null(RData),
+			{{Type, Class, TTL, NULL}, Rest2}
+	end,
+	{ok, RR, Rest3}.
 
 
-% 
+% read string
+
 read_string(<<Length:8, String:Length/binary, Rest/binary>> = P) when is_binary(P) ->
 	{ok, String, Rest}.
 
-% RData parsing
+% RData parsing for multiple RR types
 
 % General class
 
 read_cname(P) ->
-	{ok, CName, <<>>} = read_labels(P).
+	{ok, CName, <<>>} = read_labels(P),
+	{ok, CName}.
 
 read_hinfo(P) ->
 	% According to RFC 1010, CPU should be a set of uppser case letters, digits, and hyper or slash. At most 40 characers allowed.
@@ -334,7 +352,7 @@ read_mr(P) ->
 	{ok, NewName, <<>>} = read_labels(P),
 	{ok, NewName}.
 
-read_mx(<<Preference:16, Rest/binary>> = P) ->
+read_mx(<<Preference:16, Rest/binary>> = _P) ->
 	{ok, Exchange, <<>>} = read_labels(Rest),
 	{ok, {Preference, Exchange}}.
 
@@ -368,10 +386,11 @@ read_in_wks(<<A:8, B:8, C:8, D:8, IPProtocol:8, Bitmap/binary>>) ->
 	% IPv4 address
 	% IPProtoclo, for example TCP (6) or UDP
 	% Bitmap: true or false for each next port starting from 0, 1, 2, 3, ...
+	% TODO: decode bitmap into list of integers
 	{ok, {{A,B,C,D}, IPProtocol, Bitmap}}.
 
 
-% Additional restrictions for IN-ADDR.ARPA. domain
+% TODO: optional additional restrictions for IN-ADDR.ARPA, ip6.arpa and IP6.INT . domain
 %   - only SOA, NS and PTR or ANY (both in requests, domain file, or replay from us or other servers)
 
 % parsed DNS message
@@ -388,8 +407,8 @@ read_in_wks(<<A:8, B:8, C:8, D:8, IPProtocol:8, Bitmap/binary>>) ->
 	response_code = throw(not_initalized), % integer()
 	questions = [],                  % list()
 	answers = [],                    % list()
-	nameserversRR = [],              % list()
-	additionalRR = []                % list()
+	authorativeRRs = [],              % list()
+	additionalRRs = []                % list()
 }).
 
 read_message(<<ID:16,
@@ -444,33 +463,56 @@ read_message(<<ID:16,
 %   % 4096-65534 - not assigned
 %   % 65535 - reserved.
 
-	1 = QuestionsCount, % for testing
-
-	{ok, QName, Rest2} = read_labels(Rest),
-	<<QType:16, QClass:16, Rest3/binary>> = Rest2,
-	Query = {qclasses(QClass), qtypes(QType), QName},
-
-	Queries = [Query],
+	{Queries, Rest4} = lists:foldl(fun(_I, {AccL, Rest1}) ->
+			{ok, RQName, Rest2} = read_labels(Rest1),
+			QName = rlabels_to_string(RQName),
+			<<QType:16, QClass:16, Rest3/binary>> = Rest2,
+			Query = {qclasses(QClass), qtypes(QType), QName},
+			{[Query | AccL], Rest3}
+		end, {[], Rest}, lists:seq(1, QuestionsCount)),
 
 	% answer, authority, and additional sections all shere the same format
 	% it is actually the format of read_rr !
 
+	{Answers, Rest5} = lists:foldl(fun(_I, {AccL, Rest1}) ->
+			{ok, RR, Rest2} = read_rr(Rest1),
+			{[RR | AccL], Rest2}
+		end, {[], Rest4}, lists:seq(1, AnswersCount)),
 
+	{AuthorativeRRs, Rest6} = lists:foldl(fun(_I, {AccL, Rest1}) ->
+			{ok, RR, Rest2} = read_rr(Rest1),
+			{[RR | AccL], Rest2}
+		end, {[], Rest5}, lists:seq(1, NameServersRRCount)),
 
-	#dns_msg{id=ID,qr=QueryResponse,opcode=Opcode,authority=AuthorityAnswer,truncation=Truncation,
+	{AdditionalRRs, Rest7} = lists:foldl(fun(_I, {AccL, Rest1}) ->
+			{ok, RR, Rest2} = read_rr(Rest1),
+			{[RR | AccL], Rest2}
+		end, {[], Rest6}, lists:seq(1, AdditionalRRCount)),
+
+	<<>> = Rest7,
+
+	#dns_msg{
+		id=ID,
+		qr=QueryResponse,opcode=Opcode,authority=AuthorityAnswer,truncation=Truncation,
 		recursion_desired=RecursionDesired,recursion_available=RecursionAvailable,
 		authentic_data=AuthenticData,checking_disabled=CheckingDisabled,
 		response_code=ResponseCode,
-		questions=Queries}.
+		questions=Queries,
+		answers=Answers,
+		authorativeRRs=AuthorativeRRs,
+		additionalRRs=AdditionalRRs
+		}.
 
 
+rlabels_to_string([]) ->
+	<<".">>;
 rlabels_to_string(RLabels) ->
-	rlabels_to_string(RLabels, []).
+	iolist_to_binary(rlabels_to_string(RLabels, [])).
 
 rlabels_to_string([], Acc) ->
-	[Acc | $. ];
+	Acc;
 rlabels_to_string([Label | RestRLabels], Acc) ->
-	rlabels_to_string(RestRLabels, [Label | Acc]).
+	rlabels_to_string(RestRLabels, [Label, $. | Acc]).
 
 
 % One can use {packet,2} for reciving this messages also
