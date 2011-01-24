@@ -1,0 +1,46 @@
+denes - Simple DNS framework in Erlang.
+
+
+Works: Listening on UDP port and slimple parsing of most common packets implemented.
+
+
+Plans: In future it would be a comprehensive library with embeded client and server,
+resolver, recursion, database, forwarding, filtering, caching, dnssec, dnscurve,
+benchmarking, stress testing, testing this and other implementations, etc.
+
+New ideas: Shared cache beetwen multiple machines can be interesting idea.
+
+Erlang was choisen because of expresivnes of it, especilly regarding
+parsing and building binary messages. Also memory safety, speed, concurency, reliability,
+parallel processing, and embeded database was also important factors.
+
+
+
+NOTE: ALPHA QUALITY VERSION.
+
+Coded in about 6 hours after reading some RFCs.
+Not functional at all.
+Currently usefull for educational purposes or just parsing some DNS messages from clients.
+
+
+Roadmap (in order):
+   . parsing multiple queries, and answers/authority/additional sections
+   . handling compressed domain names (suffix compression)
+   . handling truncated messages.
+   . constructin of messages, as well port and ID randomization
+   . answering queries from clients using dummy data
+   . serving data from local file/db with erlang tuples or HOSTS.TXT
+   . asking other server and waiting for response for it
+   . recursion support
+   . full IPv6 support
+   . domain matching
+   . ...
+   . cache
+   . ...
+   . transparent proxy, sniffer mode
+   . avahi supprt
+   . ...
+
+
+Copyright: Witold Baryluk, 2010
+License: BSD
