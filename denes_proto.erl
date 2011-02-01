@@ -62,9 +62,8 @@ normalize_name(Name) ->
 
 % Reads and verify label from DNS packet, and returns {ok, ReversedLabels, Rest}
 
-read_labels(Bin) when is_binary(Bin), byte_size(Bin) >= 1 ->
+read_labels(Bin, WholePacket) when is_binary(Bin), byte_size(Bin) >= 1 ->
 	io:format("reading labels: ~p~n", [Bin]),
-	WholePacket = suffix_cmompression_not_implemented_yet,
 	{Labels, Rest} = read_labels(Bin, [], WholePacket),
 	ok = verify_labels(Labels),
 	{ok, Labels, Rest}.
@@ -186,7 +185,7 @@ types(24) -> sig; % for security signature                      [RFC4034][RFC375
 types(25) -> key; % for security key                            [RFC4034][RFC3755][RFC2535]
 types(26) -> px; %  X.400 mail mapping information              [RFC2163]
 types(27) -> gpos; % rfc1712
-types(28) -> aaaa; % rfc3596
+types(28) -> aaaa; % rfc3596, a update from rfc1886 (obsolated), and obsolates a6 (defined in obsolated rfc3226), and rfc3152, (and so also 2553, 2766, 2772, 2874 with respect to ip6.int -> ip6.arpa transition)
 types(29) -> loc; % experimental, rfc 1876
 types(30) -> nxt; % Next Domain - OBSOLETE, RFC3755, RFC2535
 types(31) -> eid;     % Endpoint Identifier                         [Patton]
@@ -198,7 +197,7 @@ types(33) -> srv; % rfc 2782, obsolates (experimental) rfc 2052 (major change is
 types(34) -> atma; % ATM Address                                 [ATMDOC]
 types(35) -> naptr; % Naming Authority Pointer                    [RFC2915][RFC2168][RFC3403]
 types(36) -> kx; % Key Exchanger                               [RFC2230]
-types(38) -> a6; % A6 ,Experimental, RFC3226, RFC2874
+types(38) -> a6; % A6 ,Experimental, RFC3226, RFC2874, obsolated by aaaa in rfc3596
 types(39) -> dname; % RFC2672
 types(44) -> sshfp; % SSH Key Fingerprint                         [RFC4255];
 types(45) -> ipseckey; % IPSECKEY                                    [RFC4025]
@@ -260,32 +259,35 @@ qclasses(T) ->
 
 % Read RR
 
-read_rr(P) when is_binary(P), byte_size(P) >= 1+2+2+4+2 ->   % at least: 1 byte of length in name (.), 2 bytes for type, 2 bytes for class, 4 bytes for ttl, 2 bytes for rdlength
-	{ok, Labels, Rest} = read_labels(P),
+read_rr(P, WholePacket) when is_binary(P), byte_size(P) >= 1+2+2+4+2 ->   % at least: 1 byte of length in name (.), 2 bytes for type, 2 bytes for class, 4 bytes for ttl, 2 bytes for rdlength
+	{ok, Labels, Rest} = read_labels(P, WholePacket),
 	<<Type:16, Class:16, TTL:32/unsigned, RDataLength:16, RData:RDataLength/binary, Rest2/binary>> = Rest,
 	% according to errata id 2130, to the rfc 1035 from 2010-04-05, section 3.2.1 errornously uses signed TTL, with conflict with section 4.1.3
 	RDataLength = byte_size(RData),
 	{RR, Rest3} = case {types(Type), classes(Class)} of
-%		{in, aaaa} ->
-%			{ok, AAAA} = read_in_aaaa(RData),
-%			{{Type, Class, TTL, AAAA}, Rest2}
+		{in, aaaa} ->
+			{ok, AAAA} = read_in_aaaa(RData),
+			{{Type, Class, TTL, AAAA}, Rest2};
 		{_, cname} ->
-			{ok, CName} = read_cname(RData),
+			{ok, CName} = read_cname(RData, WholePacket),
 			{{Type, Class, TTL, CName}, Rest2};
 		{in, a} ->
 			{ok, IP} = read_in_a(RData),
 			{{Type, Class, TTL, IP}, Rest2};
 		{_, ns} ->
-			{ok, NSDName} = read_ns(RData),
+			{ok, NSDName} = read_ns(RData, WholePacket),
 			{{Type, Class, TTL, NSDName}, Rest2};
 		{_, ptr} ->
-			{ok, PTR} = read_ptr(RData),
+			{ok, PTR} = read_ptr(RData, WholePacket),
 			{{Type, Class, TTL, PTR}, Rest2};
 		{_, mx} ->
-			{ok, MX} = read_mx(RData),
+			{ok, MX} = read_mx(RData, WholePacket),
+			{{Type, Class, TTL, MX}, Rest2};
+		{_, mb} ->
+			{ok, MX} = read_mb(RData, WholePacket),
 			{{Type, Class, TTL, MX}, Rest2};
 		{_, soa} ->
-			{ok, SOA} = read_soa(RData),
+			{ok, SOA} = read_soa(RData, WholePacket),
 			{{Type, Class, TTL, SOA}, Rest2};
 		{in, wks} ->
 			{ok, WKS} = read_in_wks(RData),
@@ -293,6 +295,9 @@ read_rr(P) when is_binary(P), byte_size(P) >= 1+2+2+4+2 ->   % at least: 1 byte 
 		{_, hinfo} ->
 			{ok, HInfo} = read_hinfo(RData),
 			{{Type, Class, TTL, HInfo}, Rest2};
+		{_, minfo} ->
+			{ok, MInfo} = read_minfo(RData, WholePacket),
+			{{Type, Class, TTL, MInfo}, Rest2};
 		{_, null} ->
 			{ok, NULL} = read_null(RData),
 			{{Type, Class, TTL, NULL}, Rest2}
@@ -309,8 +314,8 @@ read_string(<<Length:8, String:Length/binary, Rest/binary>> = P) when is_binary(
 
 % General class
 
-read_cname(P) ->
-	{ok, CName, <<>>} = read_labels(P),
+read_cname(P, WholePacket) ->
+	{ok, CName, <<>>} = read_labels(P, WholePacket),
 	{ok, CName}.
 
 read_hinfo(P) ->
@@ -322,54 +327,54 @@ read_hinfo(P) ->
 	{ok, {CPU, OS}}.
 
 % experimental
-read_mb(P) ->
-	{ok, MADName, <<>>} = read_labels(P),
+read_mb(P, WholePacket) ->
+	{ok, MADName, <<>>} = read_labels(P, WholePacket),
 	{ok, MADName}.
 
 % obsolate. use mx. reject or convert them as mx with prio 0
-read_md(P) ->
-	{ok, MADName, <<>>} = read_labels(P),
+read_md(P, WholePacket) ->
+	{ok, MADName, <<>>} = read_labels(P, WholePacket),
 	{ok, MADName}.
 
 % obsolate. use mx, reject or convert them as mx with prio 10
-read_mf(P) ->
-	{ok, MADName, <<>>} = read_labels(P),
+read_mf(P, WholePacket) ->
+	{ok, MADName, <<>>} = read_labels(P, WholePacket),
 	{ok, MADName}.
 
 % experimental
-read_mg(P) ->
-	{ok, MADName, <<>>} = read_labels(P),
+read_mg(P, WholePacket) ->
+	{ok, MADName, <<>>} = read_labels(P, WholePacket),
 	{ok, MADName}.
 
 % experimental
-read_minfo(P) ->
-	{ok, ResponsibleMailbox, Rest} = read_labels(P),
-	{ok, ErrorMailbox, <<>>} = read_labels(Rest),
+read_minfo(P, WholePacket) ->
+	{ok, ResponsibleMailbox, Rest} = read_labels(P, WholePacket),
+	{ok, ErrorMailbox, <<>>} = read_labels(Rest, WholePacket),
 	{ok, {ResponsibleMailbox, ErrorMailbox}}.
 
 % experimental
-read_mr(P) ->
-	{ok, NewName, <<>>} = read_labels(P),
+read_mr(P, WholePacket) ->
+	{ok, NewName, <<>>} = read_labels(P, WholePacket),
 	{ok, NewName}.
 
-read_mx(<<Preference:16, Rest/binary>> = _P) ->
-	{ok, Exchange, <<>>} = read_labels(Rest),
+read_mx(<<Preference:16, Rest/binary>> = _P, WholePacket) ->
+	{ok, Exchange, <<>>} = read_labels(Rest, WholePacket),
 	{ok, {Preference, Exchange}}.
 
 read_null(P) when byte_size(P) >= 0, byte_size(P) =< 65535 ->
 	{ok, P}.
 
-read_ns(P) ->
-	{ok, NSDName, <<>>} = read_labels(P),
+read_ns(P, WholePacket) ->
+	{ok, NSDName, <<>>} = read_labels(P, WholePacket),
 	{ok, NSDName}.
 
-read_ptr(P) ->
-	{ok, PTRDName, <<>>} = read_labels(P),
+read_ptr(P, WholePacket) ->
+	{ok, PTRDName, <<>>} = read_labels(P, WholePacket),
 	{ok, PTRDName}.
 
-read_soa(P) ->
-	{ok, MName, Rest1} = read_labels(P),
-	{ok, ResponsibleMailboxName, Rest2} = read_labels(Rest1), % yes, it is mailbox, but reading using labels, as hostmaster is assumes
+read_soa(P, WholePacket) ->
+	{ok, MName, Rest1} = read_labels(P, WholePacket),
+	{ok, ResponsibleMailboxName, Rest2} = read_labels(Rest1, WholePacket), % yes, it is mailbox, but reading using labels, as hostmaster is assumes
 	<<Serial:32, Refresh:32, Retry:32, Expire:32, MinimumTTL:32>> = Rest2, % all times in seconds
 	{ok, {MName, ResponsibleMailboxName, Serial, Refresh, Retry, Expire, MinimumTTL}}.
 
@@ -379,8 +384,9 @@ read_txt(P) when byte_size(P) >= 1 ->
 
 % IN specific records
 
+% IPv4 address
 read_in_a(<<A:8, B:8, C:8, D:8>>) ->
-	{ok, {A,B,C,D}}.  % IPv4 address
+	{ok, {A,B,C,D}}.
 
 read_in_wks(<<A:8, B:8, C:8, D:8, IPProtocol:8, Bitmap/binary>>) ->
 	% IPv4 address
@@ -388,6 +394,17 @@ read_in_wks(<<A:8, B:8, C:8, D:8, IPProtocol:8, Bitmap/binary>>) ->
 	% Bitmap: true or false for each next port starting from 0, 1, 2, 3, ...
 	% TODO: decode bitmap into list of integers
 	{ok, {{A,B,C,D}, IPProtocol, Bitmap}}.
+
+
+% IPv6 address - auxilary function to decompose 16 bits into 4x4 bits
+aaaa_nibles(<<H1:4, L1:4, H2:4, L2:4>>) ->
+	{H1, L1, H2, L2}.
+
+% IPv6 address
+% 128 bits decomposed into 8 groups each being 4-tuple with 4-bit numbers
+read_in_aaaa(<<A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16>>) ->
+	%{ok, {aaaa_nibles(A),aaaa_nibles(D),aaaa_nibles(C),aaaa_nibles(D),aaaa_nibles(E),aaaa_nibles(F),aaaa_nibles(G),aaaa_nibles(H)}}.
+	{ok, {A, B, C, D, E, F, G, H}}.
 
 
 % TODO: optional additional restrictions for IN-ADDR.ARPA, ip6.arpa and IP6.INT . domain
@@ -411,9 +428,9 @@ read_in_wks(<<A:8, B:8, C:8, D:8, IPProtocol:8, Bitmap/binary>>) ->
 	additionalRRs = []                % list()
 }).
 
-read_message(<<ID:16,
+read_message(WholePacket = <<ID:16,
                QueryResponse:1, Opcode:4, AuthorityAnswer:1, Truncation:1, RecursionDesired:1,
-               RecursionAvailable:1, ZeroReserved1:1, ZeroReserved2:1, ZeroReserved3:1, ResponseCode:4,
+               RecursionAvailable:1, ZeroReserved1:1, ZeroReserved2:1, _ZeroReserved3:1, ResponseCode:4,
                QuestionsCount:16,
                AnswersCount:16,
                NameServersRRCount:16, % in authority section
@@ -428,15 +445,19 @@ read_message(<<ID:16,
 %    4 - notify, rfc 1996
 %    5 - update, rfc 2136
 %    6-15 not assigned
+
 % Truncation:
 %   message is truncated (to 512 bytes normally) becuase of response was bigger than 512, or MTU is less than response size
+
 % RecursionAvailable cleared in response if recursion not available
+
 % ZeroReserved:
 %   should be zero in query and response (NOT COPY when responsing)
 %   Take look at, RFC4035, for bit 10 and 11 usage, known as AD Authentic Data, CD Checking Disabled.
 %   see also [RFC5395], 
     AuthenticData = ZeroReserved1,
     CheckingDisabled = ZeroReserved2,
+
 % Server response codes:
 %   rcodes(0) -> noerror; % no error,
 %   rcodes(1) -> formerr; % format error (badly formated query),
@@ -464,7 +485,7 @@ read_message(<<ID:16,
 %   % 65535 - reserved.
 
 	{Queries, Rest4} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RQName, Rest2} = read_labels(Rest1),
+			{ok, RQName, Rest2} = read_labels(Rest1, WholePacket),
 			QName = rlabels_to_string(RQName),
 			<<QType:16, QClass:16, Rest3/binary>> = Rest2,
 			Query = {qclasses(QClass), qtypes(QType), QName},
@@ -475,17 +496,17 @@ read_message(<<ID:16,
 	% it is actually the format of read_rr !
 
 	{Answers, Rest5} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RR, Rest2} = read_rr(Rest1),
+			{ok, RR, Rest2} = read_rr(Rest1, WholePacket),
 			{[RR | AccL], Rest2}
 		end, {[], Rest4}, lists:seq(1, AnswersCount)),
 
 	{AuthorativeRRs, Rest6} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RR, Rest2} = read_rr(Rest1),
+			{ok, RR, Rest2} = read_rr(Rest1, WholePacket),
 			{[RR | AccL], Rest2}
 		end, {[], Rest5}, lists:seq(1, NameServersRRCount)),
 
 	{AdditionalRRs, Rest7} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RR, Rest2} = read_rr(Rest1),
+			{ok, RR, Rest2} = read_rr(Rest1, WholePacket),
 			{[RR | AccL], Rest2}
 		end, {[], Rest6}, lists:seq(1, AdditionalRRCount)),
 
