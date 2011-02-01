@@ -43,7 +43,7 @@ Roadmap (in order):
    . transparent proxy, sniffer mode
    . avahi supprt
    . ...
-   . other data sources bind files, ldap, postgresql, odbc
+   . other data sources bind (master) files, ldap, postgresql, odbc
 
 
 Copyright: Witold Baryluk, 2011
