@@ -2,6 +2,8 @@
 -author('baryluk@smp.if.uj.edu.pl').
 
 -export([decode_packet/1]).
+-export([write_ll/1]).
+-export([compression_tests_/0]).
 
 % based on RFC 1035
 % other documents are referenced when needed
@@ -261,10 +263,12 @@ qclasses(T) ->
 
 read_rr(P, WholePacket) when is_binary(P), byte_size(P) >= 1+2+2+4+2 ->   % at least: 1 byte of length in name (.), 2 bytes for type, 2 bytes for class, 4 bytes for ttl, 2 bytes for rdlength
 	{ok, Labels, Rest} = read_labels(P, WholePacket),
-	<<Type:16, Class:16, TTL:32/unsigned, RDataLength:16, RData:RDataLength/binary, Rest2/binary>> = Rest,
+	<<Type0:16, Class0:16, TTL:32/unsigned, RDataLength:16, RData:RDataLength/binary, Rest2/binary>> = Rest,
 	% according to errata id 2130, to the rfc 1035 from 2010-04-05, section 3.2.1 errornously uses signed TTL, with conflict with section 4.1.3
 	RDataLength = byte_size(RData),
-	{RR, Rest3} = case {types(Type), classes(Class)} of
+	Type = types(Type0),
+	Class = classes(Class0),
+	{RR, Rest3} = case {Class, Type} of
 		{in, aaaa} ->
 			{ok, AAAA} = read_in_aaaa(RData),
 			{{Type, Class, TTL, AAAA}, Rest2};
@@ -300,9 +304,11 @@ read_rr(P, WholePacket) when is_binary(P), byte_size(P) >= 1+2+2+4+2 ->   % at l
 			{{Type, Class, TTL, MInfo}, Rest2};
 		{_, null} ->
 			{ok, NULL} = read_null(RData),
-			{{Type, Class, TTL, NULL}, Rest2}
+			{{Type, Class, TTL, NULL}, Rest2};
+		{_, 'UNKNOWN'} ->
+			{{{other, Type}, Class, TTL, {opaque, RData}}, Rest2}
 	end,
-	{ok, RR, Rest3}.
+	{ok, {Labels, RR}, Rest3}.
 
 
 % read string
@@ -496,18 +502,18 @@ read_message(WholePacket = <<ID:16,
 	% it is actually the format of read_rr !
 
 	{Answers, Rest5} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RR, Rest2} = read_rr(Rest1, WholePacket),
-			{[RR | AccL], Rest2}
+			{ok, Labels_And_RR, Rest2} = read_rr(Rest1, WholePacket),
+			{[Labels_And_RR | AccL], Rest2}
 		end, {[], Rest4}, lists:seq(1, AnswersCount)),
 
 	{AuthorativeRRs, Rest6} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RR, Rest2} = read_rr(Rest1, WholePacket),
-			{[RR | AccL], Rest2}
+			{ok, Labels_And_RR, Rest2} = read_rr(Rest1, WholePacket),
+			{[Labels_And_RR | AccL], Rest2}
 		end, {[], Rest5}, lists:seq(1, NameServersRRCount)),
 
 	{AdditionalRRs, Rest7} = lists:foldl(fun(_I, {AccL, Rest1}) ->
-			{ok, RR, Rest2} = read_rr(Rest1, WholePacket),
-			{[RR | AccL], Rest2}
+			{ok, Labels_And_RR, Rest2} = read_rr(Rest1, WholePacket),
+			{[Labels_And_RR | AccL], Rest2}
 		end, {[], Rest6}, lists:seq(1, AdditionalRRCount)),
 
 	<<>> = Rest7,
@@ -589,3 +595,135 @@ read_message_tcp(<<Length:16, Rest:Length/binary>>) ->
 %   RDATA of unknown RRs should written using generic binary format (see rfc 3597)
 %
 %
+
+
+%% Compression routines
+
+% "Lables" is a list of labels (dns name components), so ListOfLabels is list of lists of labels.
+
+write_ll(ListOfLabels) ->
+	write_ll(ListOfLabels, false).
+
+write_ll(ListOfLabels, CompressionDisabled) ->
+	{Result, _LastDict, _LastPosition} = lists:foldl(fun (Labels, {Acc, Dict, Position}) ->
+		{M, NewDict, NewPosition} = write_ll(Labels, Dict, Position, CompressionDisabled),
+		{[lists:reverse(M) | Acc], NewDict, NewPosition}
+	end, {[], dict:new(), 0},  ListOfLabels),
+	lists:reverse(Result).
+
+% Returns binary (or list of binaries in reversed order) encoding RR labels,
+% and NewCompressionDict.
+%
+% Taking into account suffix (label) compression using CompressionDict,
+% and current position. Tries to compress message maxially by finding maximal match,
+% using hash table of previous label suffixes.
+write_ll(Labels, CompressionDict, CurrentPosition, CompressionDisabled) ->
+	write_ll_next(Labels, CompressionDict, CompressionDict, CurrentPosition, [], CompressionDisabled).
+
+% when processing particular labels list in given RR, we only use OldCompressionDict
+% for lookup in previous RRs, for smaller and smaller suffixes,
+% each suffix is also added to the NewCompressionDict,
+% which will be used in NEXT RRs (but not this one)
+% We do not need to add suffixes if we found a whole suffix in compression dict,
+% becuase this means that previous RR added them all already,
+% as he failed to find any and added them all on the way.
+write_ll_next([], _OldCompressionDict, NewCompressionDict, CurrentPosition, Acc, CompressionDisabled) ->
+	% root domain, it is better to write it explicitly than compress from 1 to 2 bytes!
+	% we also do not add it to compression dictionary, as it is pointless.
+	M = <<2#00:2, 0:6>>,
+	{[M | Acc], NewCompressionDict, CurrentPosition+1};
+write_ll_next(Labels, OldCompressionDict, NewCompressionDict, CurrentPosition, Acc, CompressionDisabled) ->
+	R = case CompressionDisabled of
+		false -> dict:find(Labels, OldCompressionDict);
+		true -> error % just for testing, we will still put data into Dict, but will always fail on lookup
+		% NOTE: do not disable compression for production use!
+		% it will impact performance, and will make many requests too big to fit into UDP DNS message!
+		% If you really want, you can do this.
+		% Server will still be perform according to standards.
+	end,
+	case R of
+		{ok, Offset} when Offset < 4096 ->
+			M = <<2#11:2, Offset:14>>,   % 2 bytes: 2 bits of marker, and 14 of offset from the begining
+			Acc1 = [M | Acc],
+			{Acc1, NewCompressionDict, CurrentPosition+2};
+		error ->
+			[L_H | L_T] = Labels,
+			P2 = byte_size(L_H),
+			true = (1 =< P2),
+			true = (P2 =< 63),
+			% todo: verify that L_H do not contain unlegal characters
+			% TODO: verify that Labels is smaller 255 or less, even under compression
+			% (that is they are smaller than 255 BEFORE compression, so can be decompressed in constant size buffer)
+			% if this is not true, then fail (do NOT try to find shorter suffix!).
+			M = <<2#00:2, P2:6, L_H/binary>>,
+			Acc1 = [M | Acc],
+			NewNewCompressionDict = case CompressionDisabled of
+				false -> dict:store(Labels, CurrentPosition, NewCompressionDict); % store whole suffix
+				true -> NewCompressionDict
+			end,
+			NewPosition = CurrentPosition + 1 + P2, % compute new position
+			write_ll_next(L_T, OldCompressionDict, NewNewCompressionDict, NewPosition, Acc1, CompressionDisabled)
+	end.
+
+% compression tests and debuging
+
+compression_test1_(Labels) ->
+	EncNoCompress = write_ll(Labels, true),
+	EncCompress = write_ll(Labels, false),
+	EncBinCompress = iolist_to_binary(EncCompress),
+	EncBin2 = iolist_to_binary(EncNoCompress),
+	S = EncCompress,
+	io:format("~p~n~n~p (without compression) -> ~p (with compression) bytes~n~p~n~n~n", [Labels, byte_size(EncBin2), byte_size(EncBinCompress), S]),
+	ok.
+
+compression_tests_() ->
+	F = fun(X) -> compression_test1_(X) end,
+	F([ ]),
+	F([ [] ]),
+	F([ [], [] ]),
+	F([ [<<"ala">>] ]),
+	F([ [<<"ala">>], [] ]),
+	F([ [<<"ala">>], [<<"ala">>] ]),
+	F([ [<<"ala">>, <<"ala">>], [<<"ala">>] ]),
+	F([ [<<"ala">>], [<<"ola">>, <<"ala">>] ]),
+	F([ [<<"ola">>, <<"ala">>], [<<"ala">>] ]),
+	F([ [<<"ala">>], [<<"ola">>, <<"ela">>] ]),
+	F([ [<<"ala">>, <<"ela">>], [<<"ala">>] ]),
+	F([ [<<"ala">>], [<<"ala">>, <<"ala">>] ]),
+
+	F([ [<<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>] ]),
+	F([ [<<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>], [<<"pl">>] ]),
+	F([ [<<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>], [<<"tytus">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>] ]),
+	F([ [<<"tytus">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>], [<<"romeo">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>] ]),
+	F([ [<<"tytus">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>], [<<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>] ]),
+	F([ [<<"tytus">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>], [<<"dirac">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>] ]),
+
+	F([ [<<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>], [<<"www">>, <<"pw">>, <<"edu">>, <<"pl">>] ]),
+
+	F([
+		[<<"sredniczarny">>, <<"vpn">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"tytus">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"romeo">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"noisy">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"lavinia">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"malyczarny">>, <<"vpn">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"nerissa">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>],
+		[<<"julia">>, <<"smp">>, <<"if">>, <<"uj">>, <<"edu">>, <<"pl">>]
+	]),
+
+
+	F([
+	[<<"c">>, <<"0">>, <<"6">>, <<"e">>, <<"7">>, <<"4">>, <<"e">>, <<"f">>, <<"f">>, <<"f">>, <<"c">>, <<"8">>, <<"e">>, <<"1">>, <<"2">>, <<"0">>, <<"7">>, <<"2">>, <<"5">>, <<"0">>, <<"b">>, <<"0">>, <<"f">>, <<"1">>, <<"0">>, <<"7">>, <<"4">>, <<"0">>, <<"1">>, <<"0">>, <<"0">>, <<"2">>, <<"ip6">>, <<"arpa">>],
+	[<<"1">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"7">>, <<"2">>, <<"5">>, <<"0">>, <<"b">>, <<"0">>, <<"f">>, <<"1">>, <<"0">>, <<"7">>, <<"4">>, <<"0">>, <<"1">>, <<"0">>, <<"0">>, <<"2">>, <<"ip6">>, <<"arpa">>]
+	]),
+
+	F([
+	[<<"0">>, <<"6">>, <<"0">>, <<"e">>, <<"a">>, <<"b">>, <<"e">>, <<"f">>, <<"f">>, <<"f">>, <<"f">>, <<"6">>, <<"6">>, <<"1">>, <<"2">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"8">>, <<"e">>, <<"f">>, <<"ip6">>, <<"arpa">>],
+	[<<"c">>, <<"0">>, <<"6">>, <<"e">>, <<"7">>, <<"4">>, <<"e">>, <<"f">>, <<"f">>, <<"f">>, <<"c">>, <<"8">>, <<"e">>, <<"1">>, <<"2">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"8">>, <<"e">>, <<"f">>, <<"ip6">>, <<"arpa">>],
+	[<<"c">>, <<"0">>, <<"6">>, <<"e">>, <<"7">>, <<"4">>, <<"e">>, <<"f">>, <<"f">>, <<"f">>, <<"c">>, <<"8">>, <<"e">>, <<"1">>, <<"2">>, <<"0">>, <<"7">>, <<"2">>, <<"5">>, <<"0">>, <<"b">>, <<"0">>, <<"f">>, <<"1">>, <<"0">>, <<"7">>, <<"4">>, <<"0">>, <<"1">>, <<"0">>, <<"0">>, <<"2">>, <<"ip6">>, <<"arpa">>],
+	[<<"1">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"7">>, <<"2">>, <<"5">>, <<"0">>, <<"b">>, <<"0">>, <<"f">>, <<"1">>, <<"0">>, <<"7">>, <<"4">>, <<"0">>, <<"1">>, <<"0">>, <<"0">>, <<"2">>, <<"ip6">>, <<"arpa">>],
+	[<<"2">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"0">>, <<"7">>, <<"2">>, <<"5">>, <<"0">>, <<"b">>, <<"0">>, <<"f">>, <<"1">>, <<"0">>, <<"7">>, <<"4">>, <<"0">>, <<"1">>, <<"0">>, <<"0">>, <<"2">>, <<"ip6">>, <<"arpa">>]
+	]),
+
+	ok.
+
