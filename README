@@ -10,6 +10,8 @@ benchmarking, stress testing, testing this and other implementations, etc.
 
 New ideas: Shared cache beetwen multiple machines can be interesting idea.
 
+Research plans: p2p dns.
+
 Erlang was choisen because of expresivnes of it, especilly regarding
 parsing and building binary messages. Also memory safety, speed, concurency, reliability,
 parallel processing, and embeded database was also important factors.
@@ -24,10 +26,10 @@ Currently usefull for educational purposes or just parsing some DNS messages fro
 
 
 Roadmap (in order):
-   . parsing multiple queries, and answers/authority/additional sections
    . handling compressed domain names (suffix compression)
    . handling truncated messages.
    . constructin of messages, as well port and ID randomization
+   . creating compressed messages
    . answering queries from clients using dummy data
    . serving data from local file/db with erlang tuples or HOSTS.TXT
    . asking other server and waiting for response for it
@@ -41,8 +43,8 @@ Roadmap (in order):
    . transparent proxy, sniffer mode
    . avahi supprt
    . ...
+   . other data sources bind files, ldap, postgresql, odbc
 
 
 Copyright: Witold Baryluk, 2011
 License: BSD, seed LICENSE file for details
-
